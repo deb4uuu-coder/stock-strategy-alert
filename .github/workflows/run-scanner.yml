@@ -1,9 +1,9 @@
-name: Daily Stock Scanner
+name: Stock Scanner
 
 on:
+  workflow_dispatch:   # manual run
   schedule:
-    - cron: "30 11 * * 1-5"   # Runs Mon–Fri at 11:30 UTC (~5 PM IST)
-  workflow_dispatch:
+    - cron: "30 2 * * *"   # 8:00 AM IST
 
 jobs:
   scan:
@@ -22,4 +22,6 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Run scanner
+        env:
+          EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
         run: python scanner.py
