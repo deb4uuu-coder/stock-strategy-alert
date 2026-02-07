@@ -2,48 +2,29 @@ import pandas as pd
 import yfinance as yf
 import smtplib
 import os
-from email.mime.text import MIMEText
 from datetime import datetime
-from zoneinfo import ZoneInfo
+from email.mime.text import MIMEText
 
 # ================= CONFIG =================
+EMAIL_FROM = os.environ["EMAIL_FROM"]
+EMAIL_PASSWORD = os.environ["EMAIL_PASSWORD"]
+EMAIL_TO = os.environ["EMAIL_TO"]
 
 CSV_FILE = "stocks_layout.csv"
 
-EMAIL_FROM = "deb.4uuu@gmail.com"
-EMAIL_TO = "deb.4uuu@gmail.com"
-EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD")
-
-PRICE_TOLERANCE = 0.03
-V20_MIN_MOVE = 0.20
-H45_DMA_DROP = 0.14
-LOOKBACK_YEARS = 4
-
-GITHUB_EVENT = os.getenv("GITHUB_EVENT_NAME", "")
-IST = ZoneInfo("Asia/Kolkata")
-
+V20_MIN_MOVE = 0.20      # 20%
+PRICE_NEAR_PCT = 0.03    # 3%
+LOOKBACK_DAYS = 120
 # =========================================
 
 
-def is_weekend_ist():
-    return datetime.now(IST).weekday() >= 5
-
-
-def allow_email():
-    if GITHUB_EVENT == "workflow_dispatch":
-        return True
-    if GITHUB_EVENT == "schedule" and is_weekend_ist():
-        return False
-    return True
+def is_weekend():
+    return datetime.today().weekday() >= 5
 
 
 def send_email(body):
-    if not allow_email():
-        print("Weekend detected (IST) — email skipped.")
-        return
-
     msg = MIMEText(body)
-    msg["Subject"] = "📈 Stock Strategy Buy Alert"
+    msg["Subject"] = "📊 Stock Strategy Alert"
     msg["From"] = EMAIL_FROM
     msg["To"] = EMAIL_TO
 
@@ -52,159 +33,94 @@ def send_email(body):
         server.send_message(msg)
 
 
-def download_data(symbol):
-    try:
-        df = yf.download(
-            symbol,
-            period=f"{LOOKBACK_YEARS}y",
-            interval="1d",
-            progress=False
-        )
-        if df.empty or "Close" not in df.columns:
-            return None
+def load_stocks(col):
+    df = pd.read_csv(CSV_FILE)
+    stocks = df[col].dropna().astype(str).tolist()
+    return stocks
 
-        df = df.dropna()
-        df["Close"] = df["Close"].astype(float)  # 🔑 FIX
-        return df
 
-    except Exception:
+def get_data(symbol):
+    df = yf.download(symbol, period="6mo", interval="1d", progress=False)
+    if df.empty:
         return None
+    df = df.reset_index()
+    df["Close"] = df["Close"].astype(float)
+    return df
 
-
-# ================= V20 / V40 LOGIC =================
 
 def find_v20_patterns(df):
     patterns = []
-    closes = df["Close"].values  # numpy array (fast + safe)
-    dates = df.index
+    close = df["Close"]
 
-    for i in range(len(closes) - 1):
-        start_price = closes[i]
-        start_date = dates[i]
+    for i in range(10, len(df)):
+        start_price = close.iloc[i - 10]
+        end_price = close.iloc[i]
+        move = (end_price - start_price) / start_price
 
-        for j in range(i + 1, len(closes)):
-            move = (closes[j] - start_price) / start_price
-
-            if move >= V20_MIN_MOVE:
-                patterns.append({
-                    "start_date": start_date,
-                    "end_date": dates[j],
-                    "start_price": start_price,
-                    "end_price": closes[j],
-                    "move_pct": move * 100
-                })
-                break
+        if move >= V20_MIN_MOVE:
+            patterns.append({
+                "start_date": df["Date"].iloc[i - 10].date(),
+                "end_date": df["Date"].iloc[i].date(),
+                "start_price": round(start_price, 2),
+                "end_price": round(end_price, 2)
+            })
 
     return patterns
 
 
-def check_v20_signal(symbol, group_name):
-    df = download_data(symbol)
-    if df is None or len(df) < 300:
+def check_signal(symbol, group):
+    df = get_data(symbol)
+    if df is None:
         return []
 
-    current_price = float(df["Close"].iloc[-1])
+    alerts = []
+    close = df["Close"]
+    current_price = close.iloc[-1]
+
     patterns = find_v20_patterns(df)
 
-    alerts = []
-
     for p in patterns:
-        diff_pct = (current_price - p["start_price"]) / p["start_price"]
+        pattern_price = p["end_price"]
+        diff_pct = abs(current_price - pattern_price) / pattern_price
 
-        if abs(diff_pct) <= PRICE_TOLERANCE:
+        if diff_pct <= PRICE_NEAR_PCT:
             alerts.append(
-                f"🟢 BUY ALERT – {group_name} ACTIVATED\n\n"
-                f"Stock: {symbol}\n"
-                f"Strategy: V20 (20% Up-Move Retracement)\n\n"
-                f"Pattern Used:\n"
-                f"• Start Date: {p['start_date'].date()}\n"
-                f"• End Date: {p['end_date'].date()}\n"
-                f"• Start Price: ₹{p['start_price']:.2f}\n"
-                f"• End Price: ₹{p['end_price']:.2f}\n"
-                f"• Pattern Move: +{p['move_pct']:.1f}%\n\n"
-                f"Current Status:\n"
-                f"• Current Price: ₹{current_price:.2f}\n"
-                f"• Distance from Pattern Start: {diff_pct*100:.2f}%\n\n"
-                f"Reason:\n"
-                f"Price is near or matching historical pattern start price\n"
-                f"{'-'*50}\n"
+                f"""
+Stock : {symbol}
+Group : {group}
+Pattern : V20 Activated
+Pattern Start : {p['start_date']}
+Pattern End   : {p['end_date']}
+Pattern Price : {pattern_price}
+Current Price : {round(current_price,2)}
+Status : Price near / matching pattern
+------------------------------------
+"""
             )
-            break
 
     return alerts
 
 
-# ================= H45 LOGIC =================
-
-def check_h45_signal(symbol):
-    df = download_data(symbol)
-    if df is None or len(df) < 220:
-        return []
-
-    df["DMA200"] = df["Close"].rolling(200).mean()
-
-    current_price = float(df["Close"].iloc[-1])
-    dma200 = df["DMA200"].iloc[-1]
-
-    if pd.isna(dma200):
-        return []
-
-    drop_pct = (current_price - dma200) / dma200
-
-    if drop_pct <= -H45_DMA_DROP:
-        return [
-            f"🟣 BUY ALERT – H45 ACTIVATED\n\n"
-            f"Stock: {symbol}\n"
-            f"Strategy: Mean Reversion (200 DMA)\n\n"
-            f"Current Status:\n"
-            f"• Current Price: ₹{current_price:.2f}\n"
-            f"• 200 DMA: ₹{dma200:.2f}\n"
-            f"• Distance from 200 DMA: {drop_pct*100:.2f}%\n\n"
-            f"Reason:\n"
-            f"Stock is trading ≥14% below 200-day moving average\n"
-            f"{'-'*50}\n"
-        ]
-
-    return []
-
-
-# ================= UTIL =================
-
-def read_symbols(col_index):
-    df = pd.read_csv(CSV_FILE)
-    symbols = []
-
-    for i in range(2, len(df)):
-        val = str(df.iloc[i, col_index]).strip()
-        if val and val != "nan":
-            symbols.append(val)
-
-    return symbols
-
-
-# ================= MAIN =================
-
 def main():
+    manual_run = os.environ.get("MANUAL_RUN", "false").lower() == "true"
+
+    if not manual_run and is_weekend():
+        print("Weekend – no automatic email")
+        return
+
     alerts = []
 
-    v40_symbols = read_symbols(1)
-    v40_next_symbols = read_symbols(4)
-    h45_symbols = read_symbols(7)
+    for s in load_stocks("V40"):
+        alerts.extend(check_signal(s, "V40"))
 
-    for s in v40_symbols:
-        alerts.extend(check_v20_signal(s, "V40"))
-
-    for s in v40_next_symbols:
-        alerts.extend(check_v20_signal(s, "V40 NEXT"))
-
-    for s in h45_symbols:
-        alerts.extend(check_h45_signal(s))
+    for s in load_stocks("H45"):
+        alerts.extend(check_signal(s, "H45"))
 
     if alerts:
         send_email("\n".join(alerts))
-        print("Buy alerts sent")
+        print("Email sent")
     else:
-        print("No strategy triggered today")
+        print("No signals today")
 
 
 if __name__ == "__main__":
