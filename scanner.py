@@ -45,7 +45,9 @@ def clean_yf_df(df):
     """Flatten yfinance dataframe safely"""
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
-    return df.dropna()
+    # Don't drop all NaN rows - only reset index
+    df = df.reset_index(drop=False)
+    return df
 
 
 # ---------------- READ CSV ----------------
@@ -83,8 +85,9 @@ def find_v20_patterns(symbol):
     i = 0
 
     while i < len(df) - 1:
-        open_p = float(df.at[df.index[i], "Open"])
-        close_p = float(df.at[df.index[i], "Close"])
+        # Fixed: Use iloc instead of at
+        open_p = float(df.iloc[i]["Open"])
+        close_p = float(df.iloc[i]["Close"])
 
         # Must be green candle
         if close_p <= open_p:
@@ -92,13 +95,16 @@ def find_v20_patterns(symbol):
             continue
 
         start_price = open_p
-        start_date = df.index[i].date()
+        start_date = df.iloc[i]["Date"] if "Date" in df.columns else df.index[i]
+        if hasattr(start_date, 'date'):
+            start_date = start_date.date()
+        
         high = close_p
         j = i + 1
 
         while j < len(df):
-            o = float(df.at[df.index[j], "Open"])
-            c = float(df.at[df.index[j], "Close"])
+            o = float(df.iloc[j]["Open"])
+            c = float(df.iloc[j]["Close"])
 
             if c <= o:
                 break
@@ -132,6 +138,7 @@ def check_h45(symbol):
     if len(df) < 200:
         return None
 
+    # Fixed: Use iloc instead of at
     current = float(df["Close"].iloc[-1])
     dma200 = float(df["Close"].rolling(200).mean().iloc[-1])
 
