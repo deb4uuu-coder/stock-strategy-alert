@@ -11,13 +11,14 @@ from datetime import datetime
 # CONFIG
 # =========================
 CSV_FILE = "stocks_layout.csv"
+
 EMAIL_FROM = os.getenv("EMAIL_FROM")
 EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD")
 EMAIL_TO = os.getenv("EMAIL_TO")
 
 
 # =========================
-# SAFETY CHECK
+# EMAIL CHECK
 # =========================
 if not EMAIL_FROM or not EMAIL_PASSWORD or not EMAIL_TO:
     print("Email credentials missing")
@@ -27,8 +28,8 @@ if not EMAIL_FROM or not EMAIL_PASSWORD or not EMAIL_TO:
 # =========================
 # EMAIL FUNCTION
 # =========================
-def send_email(message):
-    msg = MIMEText(message)
+def send_email(body):
+    msg = MIMEText(body)
     msg["Subject"] = "Stock Strategy Alert"
     msg["From"] = EMAIL_FROM
     msg["To"] = EMAIL_TO
@@ -39,18 +40,18 @@ def send_email(message):
 
 
 # =========================
-# STOCK SCANNER CLASS
+# SCANNER
 # =========================
 class StockScanner:
 
     def read_stocks(self):
         if not os.path.exists(CSV_FILE):
-            raise FileNotFoundError(f"{CSV_FILE} not found in repo")
+            raise FileNotFoundError(f"{CSV_FILE} not found")
 
         df = pd.read_csv(CSV_FILE)
 
         if "Symbol" not in df.columns:
-            raise ValueError("CSV must contain 'Symbol' column")
+            raise ValueError("CSV must contain column named 'Symbol'")
 
         return df["Symbol"].dropna().unique().tolist()
 
@@ -71,39 +72,38 @@ class StockScanner:
 
         df["MA20"] = df["Close"].rolling(20).mean()
 
-        last = df.iloc[-1]
         prev = df.iloc[-2]
+        curr = df.iloc[-1]
 
-        # V20 logic: price crossing above 20 MA
-        if prev["Close"] < prev["MA20"] and last["Close"] > last["MA20"]:
+        if prev["Close"] < prev["MA20"] and curr["Close"] > curr["MA20"]:
             alerts.append(
-                f"{symbol} | V20 ACTIVATED\n"
-                f"Date: {last['Date'].date()}\n"
-                f"Price: {round(last['Close'], 2)}"
+                f"{symbol}\n"
+                f"V20 ACTIVATED\n"
+                f"Date: {curr['Date'].date()}\n"
+                f"Price: {round(curr['Close'], 2)}"
             )
 
         return alerts
 
     def run(self):
         symbols = self.read_stocks()
-        all_alerts = []
+        alerts = []
 
-        for symbol in symbols:
-            df = self.fetch_data(symbol)
+        for s in symbols:
+            df = self.fetch_data(s)
             if df is None:
                 continue
+            alerts.extend(self.check_v20(df, s))
 
-            all_alerts.extend(self.check_v20(df, symbol))
-
-        if all_alerts:
-            send_email("\n\n".join(all_alerts))
-            print("Email sent successfully")
+        if alerts:
+            send_email("\n\n".join(alerts))
+            print("Email sent")
         else:
             print("No signals found")
 
 
 # =========================
-# ENTRY POINT
+# MAIN
 # =========================
 if __name__ == "__main__":
     scanner = StockScanner()
