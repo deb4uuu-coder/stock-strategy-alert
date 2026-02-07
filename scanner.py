@@ -1,205 +1,110 @@
-import pandas as pd
-import yfinance as yf
-from datetime import datetime, timedelta
-import smtplib
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
 import os
 import sys
-import pytz
+import pandas as pd
+import yfinance as yf
+import smtplib
+from email.mime.text import MIMEText
+from datetime import datetime
 
-# ================== CONFIG ==================
 
-V20_LOOKBACK_DAYS = 365 * 4
-V20_MIN_GAIN = 20
-V20_TOLERANCE = 3        # ±3%
+# =========================
+# CONFIG
+# =========================
+CSV_FILE = "stocks_layout.csv"
+EMAIL_FROM = os.getenv("EMAIL_FROM")
+EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD")
+EMAIL_TO = os.getenv("EMAIL_TO")
 
-H45_DROP_PCT = 14        # 14%
-H45_SMA_DAYS = 200
 
-IST = pytz.timezone("Asia/Kolkata")
-GITHUB_EVENT = os.getenv("GITHUB_EVENT_NAME", "")
+# =========================
+# SAFETY CHECK
+# =========================
+if not EMAIL_FROM or not EMAIL_PASSWORD or not EMAIL_TO:
+    print("Email credentials missing")
+    sys.exit(1)
 
-# ================== EMAIL RULE ==================
 
-def should_send_email():
-    now_ist = datetime.now(IST)
+# =========================
+# EMAIL FUNCTION
+# =========================
+def send_email(message):
+    msg = MIMEText(message)
+    msg["Subject"] = "Stock Strategy Alert"
+    msg["From"] = EMAIL_FROM
+    msg["To"] = EMAIL_TO
 
-    if GITHUB_EVENT == "workflow_dispatch":
-        print("Manual run → email allowed")
-        return True
+    with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
+        server.login(EMAIL_FROM, EMAIL_PASSWORD)
+        server.send_message(msg)
 
-    if GITHUB_EVENT == "schedule" and now_ist.weekday() >= 5:
-        print("Weekend auto run → email blocked")
-        return False
 
-    return True
-
-# ================== SCANNER ==================
-
-class V20Scanner:
-    def __init__(self, excel_file, email_to, email_from, email_password):
-        self.excel_file = excel_file
-        self.email_to = email_to
-        self.email_from = email_from
-        self.email_password = email_password
-        self.alerts = []
+# =========================
+# STOCK SCANNER CLASS
+# =========================
+class StockScanner:
 
     def read_stocks(self):
-        xls = pd.ExcelFile(self.excel_file)
-        stocks = {}
+        if not os.path.exists(CSV_FILE):
+            raise FileNotFoundError(f"{CSV_FILE} not found in repo")
 
-        for sheet in ["v40", "v40next", "v200"]:
-            if sheet in xls.sheet_names:
-                df = pd.read_excel(xls, sheet_name=sheet)
-                stocks[sheet] = df.iloc[:, 1].dropna().tolist()
+        df = pd.read_csv(CSV_FILE)
 
-        return stocks
+        if "Symbol" not in df.columns:
+            raise ValueError("CSV must contain 'Symbol' column")
 
-    # ================== V20 PATTERN ==================
+        return df["Symbol"].dropna().unique().tolist()
 
-    def find_v20_patterns(self, symbol):
-        end = datetime.now()
-        start = end - timedelta(days=V20_LOOKBACK_DAYS)
+    def fetch_data(self, symbol):
+        df = yf.download(symbol, period="6mo", interval="1d", progress=False)
 
-        df = yf.Ticker(symbol).history(start=start, end=end)
         if df.empty:
-            return []
+            return None
 
-        patterns = []
-        i = 0
+        df.reset_index(inplace=True)
+        return df
 
-        while i < len(df):
-            start_price = df.iloc[i]["Open"]
-            start_date = df.index[i]
+    def check_v20(self, df, symbol):
+        alerts = []
 
-            j = i
-            high = start_price
+        if len(df) < 20:
+            return alerts
 
-            while j < len(df) and df.iloc[j]["Close"] > df.iloc[j]["Open"]:
-                high = max(high, df.iloc[j]["Close"])
-                j += 1
+        df["MA20"] = df["Close"].rolling(20).mean()
 
-            gain = ((high - start_price) / start_price) * 100
+        last = df.iloc[-1]
+        prev = df.iloc[-2]
 
-            if gain >= V20_MIN_GAIN:
-                patterns.append({
-                    "start_price": round(start_price, 2),
-                    "start_date": start_date.strftime("%Y-%m-%d"),
-                    "end_date": df.index[j - 1].strftime("%Y-%m-%d"),
-                    "gain": round(gain, 2)
-                })
-
-            i = max(j, i + 1)
-
-        return patterns
-
-    # ================== CURRENT PRICE ==================
-
-    def current_price_and_sma(self, symbol):
-        df = yf.Ticker(symbol).history(period="220d")
-        if df.empty:
-            return None, None
-
-        price = round(df.iloc[-1]["Close"], 2)
-        sma = df["Close"].rolling(H45_SMA_DAYS).mean().iloc[-1]
-
-        return price, round(sma, 2) if not pd.isna(sma) else None
-
-    # ================== CHECK LOGIC ==================
-
-    def check_v20(self, symbol, group):
-        patterns = self.find_v20_patterns(symbol)
-        price, _ = self.current_price_and_sma(symbol)
-
-        if not patterns or price is None:
-            return
-
-        for p in patterns:
-            diff = abs(price - p["start_price"]) / p["start_price"] * 100
-
-            if diff <= V20_TOLERANCE:
-                self.alerts.append(
-                    f"""🟢 {symbol}
-Group: {group.upper()}
-Strategy: V20 ACTIVATED
-Pattern: {p['start_date']} → {p['end_date']}
-Pattern Price: {p['start_price']}
-Current Price: {price}
-Difference: {round(diff,2)}%
-Gain: {p['gain']}%"""
-                )
-
-    def check_h45(self, symbol):
-        price, sma = self.current_price_and_sma(symbol)
-        if price is None or sma is None:
-            return
-
-        drop = (sma - price) / sma * 100
-
-        if drop >= H45_DROP_PCT:
-            self.alerts.append(
-                f"""🔵 {symbol}
-Group: H45
-Strategy: H45 ACTIVATED
-200 DMA: {sma}
-Current Price: {price}
-Below MA: {round(drop,2)}%"""
+        # V20 logic: price crossing above 20 MA
+        if prev["Close"] < prev["MA20"] and last["Close"] > last["MA20"]:
+            alerts.append(
+                f"{symbol} | V20 ACTIVATED\n"
+                f"Date: {last['Date'].date()}\n"
+                f"Price: {round(last['Close'], 2)}"
             )
 
-    # ================== EMAIL ==================
-
-    def send_email(self):
-        if not self.alerts:
-            print("No alerts generated")
-            return
-
-        if not should_send_email():
-            print("Email suppressed by rule")
-            return
-
-        msg = MIMEMultipart()
-        msg["From"] = self.email_from
-        msg["To"] = self.email_to
-        msg["Subject"] = f"Stock Strategy Alert – {datetime.now(IST).date()}"
-
-        body = "\n\n".join(self.alerts)
-        msg.attach(MIMEText(body, "plain"))
-
-        server = smtplib.SMTP("smtp.gmail.com", 587)
-        server.starttls()
-        server.login(self.email_from, self.email_password)
-        server.send_message(msg)
-        server.quit()
-
-        print("Email sent successfully")
-
-    # ================== RUN ==================
+        return alerts
 
     def run(self):
-        stocks = self.read_stocks()
+        symbols = self.read_stocks()
+        all_alerts = []
 
-        for s in stocks.get("v40", []):
-            self.check_v20(s, "V40")
+        for symbol in symbols:
+            df = self.fetch_data(symbol)
+            if df is None:
+                continue
 
-        for s in stocks.get("v40next", []):
-            self.check_v20(s, "V40 NEXT")
+            all_alerts.extend(self.check_v20(df, symbol))
 
-        for s in stocks.get("v200", []):
-            self.check_h45(s)
+        if all_alerts:
+            send_email("\n\n".join(all_alerts))
+            print("Email sent successfully")
+        else:
+            print("No signals found")
 
-        self.send_email()
 
-# ================== MAIN ==================
-
+# =========================
+# ENTRY POINT
+# =========================
 if __name__ == "__main__":
-    EMAIL_FROM = os.getenv("EMAIL_FROM")
-    EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD")
-    EMAIL_TO = "deb.4uuu@gmail.com"
-
-    if not EMAIL_FROM or not EMAIL_PASSWORD:
-        print("Email credentials missing")
-        sys.exit(1)
-
-    scanner = V20Scanner("stocks.xlsx", EMAIL_TO, EMAIL_FROM, EMAIL_PASSWORD)
+    scanner = StockScanner()
     scanner.run()
