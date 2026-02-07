@@ -7,18 +7,18 @@ import os
 import sys
 import pytz
 
+# ================= CONFIG =================
 CSV_FILE = "stocks_layout.csv"
 
 IST = pytz.timezone("Asia/Kolkata")
 
-V20_MIN_MOVE = 20          # 20% upmove
-V20_NEAR_DIFF = 3          # 3% near pattern
-H45_DMA_DIFF = 14          # 14% below 200 DMA
+V20_MIN_MOVE = 20      # 20% upmove
+V20_NEAR_DIFF = 3      # 3% near pattern
+H45_DMA_DIFF = 14      # 14% below 200 DMA
+# ==========================================
 
 
-# -------------------------------------------------------
-# EMAIL
-# -------------------------------------------------------
+# ---------------- EMAIL -------------------
 def send_email(subject, body):
     email_from = os.getenv("EMAIL_FROM")
     email_to = os.getenv("EMAIL_TO")
@@ -40,10 +40,14 @@ def send_email(subject, body):
     server.quit()
 
 
-# -------------------------------------------------------
-# READ CSV (YOUR FORMAT)
-# -------------------------------------------------------
+# ---------------- READ CSV ----------------
 def read_stocks():
+    """
+    CSV FORMAT (your file):
+    Column 1: V40 GROUP
+    Column 2: V40 NEXT GROUP
+    Column 3: H45 GROUP
+    """
     df = pd.read_csv(CSV_FILE)
 
     stocks = {
@@ -52,16 +56,14 @@ def read_stocks():
         "H45": df.iloc[:, 2].dropna().tolist(),
     }
 
-    # Remove numeric rows like 1,2,3
+    # Remove numbering rows (1,2,3...) and keep only symbols
     for k in stocks:
-        stocks[k] = [s for s in stocks[k] if isinstance(s, str) and ".NS" in s]
+        stocks[k] = [s.strip() for s in stocks[k] if isinstance(s, str) and ".NS" in s]
 
     return stocks
 
 
-# -------------------------------------------------------
-# FIND V20 PATTERNS (SAFE LOGIC)
-# -------------------------------------------------------
+# ------------- V20 PATTERN ----------------
 def find_v20_patterns(symbol):
     df = yf.download(symbol, period="4y", progress=False)
 
@@ -72,6 +74,7 @@ def find_v20_patterns(symbol):
     i = 0
 
     while i < len(df) - 1:
+        # green candle start
         if df.iloc[i]["Close"] <= df.iloc[i]["Open"]:
             i += 1
             continue
@@ -100,9 +103,7 @@ def find_v20_patterns(symbol):
     return patterns
 
 
-# -------------------------------------------------------
-# CHECK H45 CONDITION
-# -------------------------------------------------------
+# ------------- H45 LOGIC ------------------
 def check_h45(symbol):
     df = yf.download(symbol, period="1y", progress=False)
 
@@ -120,12 +121,11 @@ def check_h45(symbol):
     return None
 
 
-# -------------------------------------------------------
-# MAIN RUN
-# -------------------------------------------------------
-def run(manual=False):
+# ---------------- RUN ---------------------
+def run(manual):
     now = datetime.now(IST)
 
+    # Block ONLY automatic runs on weekends
     if not manual and now.weekday() >= 5:
         print("Weekend – no automatic email")
         return
@@ -133,7 +133,7 @@ def run(manual=False):
     stocks = read_stocks()
     alerts = []
 
-    # -------- V40 & V40 NEXT (V20 LOGIC)
+    # -------- V40 & V40 NEXT (V20 STRATEGY)
     for group in ["V40", "V40NEXT"]:
         for s in stocks[group]:
             patterns = find_v20_patterns(s)
@@ -157,7 +157,7 @@ def run(manual=False):
                         f"Difference: {round(diff,2)}%\n"
                     )
 
-    # -------- H45 LOGIC
+    # -------- H45 STRATEGY
     for s in stocks["H45"]:
         result = check_h45(s)
         if result:
@@ -179,9 +179,17 @@ def run(manual=False):
         print("No alerts today")
 
 
-# -------------------------------------------------------
-# ENTRY
-# -------------------------------------------------------
+# --------------- ENTRY --------------------
 if __name__ == "__main__":
-    manual_run = "--manual" in sys.argv
+    github_event = os.getenv("GITHUB_EVENT_NAME")
+    github_actions = os.getenv("GITHUB_ACTIONS")
+
+    # Manual if:
+    # 1) GitHub workflow_dispatch
+    # 2) OR local run (not GitHub Actions)
+    manual_run = (
+        github_event == "workflow_dispatch"
+        or github_actions is None
+    )
+
     run(manual=manual_run)
