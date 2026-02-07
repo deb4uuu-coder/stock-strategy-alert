@@ -40,14 +40,16 @@ def send_email(subject, body):
     server.quit()
 
 
+# ---------------- UTIL -------------------
+def clean_yf_df(df):
+    """Flatten yfinance dataframe safely"""
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = df.columns.get_level_values(0)
+    return df.dropna()
+
+
 # ---------------- READ CSV ----------------
 def read_stocks():
-    """
-    CSV FORMAT (your file):
-    Column 1: V40 GROUP
-    Column 2: V40 NEXT GROUP
-    Column 3: H45 GROUP
-    """
     df = pd.read_csv(CSV_FILE)
 
     stocks = {
@@ -56,9 +58,12 @@ def read_stocks():
         "H45": df.iloc[:, 2].dropna().tolist(),
     }
 
-    # Remove numbering rows (1,2,3...) and keep only symbols
     for k in stocks:
-        stocks[k] = [s.strip() for s in stocks[k] if isinstance(s, str) and ".NS" in s]
+        stocks[k] = [
+            s.strip()
+            for s in stocks[k]
+            if isinstance(s, str) and s.endswith(".NS")
+        ]
 
     return stocks
 
@@ -66,26 +71,39 @@ def read_stocks():
 # ------------- V20 PATTERN ----------------
 def find_v20_patterns(symbol):
     df = yf.download(symbol, period="4y", progress=False)
+    if df.empty:
+        return []
 
-    if df.empty or len(df) < 50:
+    df = clean_yf_df(df)
+
+    if len(df) < 50:
         return []
 
     patterns = []
     i = 0
 
     while i < len(df) - 1:
-        # green candle start
-        if df.iloc[i]["Close"] <= df.iloc[i]["Open"]:
+        open_p = float(df.at[df.index[i], "Open"])
+        close_p = float(df.at[df.index[i], "Close"])
+
+        # Must be green candle
+        if close_p <= open_p:
             i += 1
             continue
 
-        start_price = float(df.iloc[i]["Open"])
+        start_price = open_p
         start_date = df.index[i].date()
-        high = start_price
-        j = i
+        high = close_p
+        j = i + 1
 
-        while j < len(df) and df.iloc[j]["Close"] > df.iloc[j]["Open"]:
-            high = max(high, float(df.iloc[j]["Close"]))
+        while j < len(df):
+            o = float(df.at[df.index[j], "Open"])
+            c = float(df.at[df.index[j], "Close"])
+
+            if c <= o:
+                break
+
+            high = max(high, c)
             j += 1
 
         move = ((high - start_price) / start_price) * 100
@@ -106,12 +124,16 @@ def find_v20_patterns(symbol):
 # ------------- H45 LOGIC ------------------
 def check_h45(symbol):
     df = yf.download(symbol, period="1y", progress=False)
-
-    if df.empty or len(df) < 200:
+    if df.empty:
         return None
 
-    current = float(df.iloc[-1]["Close"])
-    dma200 = df["Close"].rolling(200).mean().iloc[-1]
+    df = clean_yf_df(df)
+
+    if len(df) < 200:
+        return None
+
+    current = float(df["Close"].iloc[-1])
+    dma200 = float(df["Close"].rolling(200).mean().iloc[-1])
 
     diff = ((dma200 - current) / dma200) * 100
 
@@ -125,7 +147,7 @@ def check_h45(symbol):
 def run(manual):
     now = datetime.now(IST)
 
-    # Block ONLY automatic runs on weekends
+    # Block ONLY auto runs on weekend
     if not manual and now.weekday() >= 5:
         print("Weekend – no automatic email")
         return
@@ -133,7 +155,7 @@ def run(manual):
     stocks = read_stocks()
     alerts = []
 
-    # -------- V40 & V40 NEXT (V20 STRATEGY)
+    # -------- V40 & V40 NEXT
     for group in ["V40", "V40NEXT"]:
         for s in stocks[group]:
             patterns = find_v20_patterns(s)
@@ -141,7 +163,12 @@ def run(manual):
                 continue
 
             df = yf.download(s, period="5d", progress=False)
-            current = float(df.iloc[-1]["Close"])
+            df = clean_yf_df(df)
+
+            if df.empty:
+                continue
+
+            current = float(df["Close"].iloc[-1])
 
             for p in patterns:
                 diff = abs((current - p["start_price"]) / p["start_price"]) * 100
@@ -157,7 +184,7 @@ def run(manual):
                         f"Difference: {round(diff,2)}%\n"
                     )
 
-    # -------- H45 STRATEGY
+    # -------- H45
     for s in stocks["H45"]:
         result = check_h45(s)
         if result:
@@ -184,9 +211,6 @@ if __name__ == "__main__":
     github_event = os.getenv("GITHUB_EVENT_NAME")
     github_actions = os.getenv("GITHUB_ACTIONS")
 
-    # Manual if:
-    # 1) GitHub workflow_dispatch
-    # 2) OR local run (not GitHub Actions)
     manual_run = (
         github_event == "workflow_dispatch"
         or github_actions is None
