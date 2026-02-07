@@ -14,32 +14,26 @@ EMAIL_FROM = "deb.4uuu@gmail.com"
 EMAIL_TO = "deb.4uuu@gmail.com"
 EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD")
 
-PRICE_TOLERANCE = 0.03      # 3%
-V20_MIN_MOVE = 0.20         # 20%
-H45_DMA_DROP = 0.14         # 14%
+PRICE_TOLERANCE = 0.03
+V20_MIN_MOVE = 0.20
+H45_DMA_DROP = 0.14
 LOOKBACK_YEARS = 4
 
 GITHUB_EVENT = os.getenv("GITHUB_EVENT_NAME", "")
-
 IST = ZoneInfo("Asia/Kolkata")
 
 # =========================================
 
 
 def is_weekend_ist():
-    ist_now = datetime.now(IST)
-    return ist_now.weekday() >= 5   # Saturday / Sunday
+    return datetime.now(IST).weekday() >= 5
 
 
 def allow_email():
-    # Manual run → always allow
     if GITHUB_EVENT == "workflow_dispatch":
         return True
-
-    # Scheduled run → block weekends (IST)
     if GITHUB_EVENT == "schedule" and is_weekend_ist():
         return False
-
     return True
 
 
@@ -68,7 +62,11 @@ def download_data(symbol):
         )
         if df.empty or "Close" not in df.columns:
             return None
-        return df.dropna()
+
+        df = df.dropna()
+        df["Close"] = df["Close"].astype(float)  # 🔑 FIX
+        return df
+
     except Exception:
         return None
 
@@ -76,31 +74,26 @@ def download_data(symbol):
 # ================= V20 / V40 LOGIC =================
 
 def find_v20_patterns(df):
-    """
-    Finds overall up-move patterns where price moved >= 20%
-    (not strict green candles)
-    """
     patterns = []
-    closes = df["Close"]
+    closes = df["Close"].values  # numpy array (fast + safe)
     dates = df.index
 
-    i = 0
-    while i < len(closes) - 1:
-        start_price = closes.iloc[i]
+    for i in range(len(closes) - 1):
+        start_price = closes[i]
         start_date = dates[i]
 
         for j in range(i + 1, len(closes)):
-            move = (closes.iloc[j] - start_price) / start_price
+            move = (closes[j] - start_price) / start_price
+
             if move >= V20_MIN_MOVE:
                 patterns.append({
                     "start_date": start_date,
                     "end_date": dates[j],
                     "start_price": start_price,
-                    "end_price": closes.iloc[j],
+                    "end_price": closes[j],
                     "move_pct": move * 100
                 })
                 break
-        i += 1
 
     return patterns
 
@@ -110,7 +103,7 @@ def check_v20_signal(symbol, group_name):
     if df is None or len(df) < 300:
         return []
 
-    current_price = df["Close"].iloc[-1]
+    current_price = float(df["Close"].iloc[-1])
     patterns = find_v20_patterns(df)
 
     alerts = []
@@ -136,7 +129,7 @@ def check_v20_signal(symbol, group_name):
                 f"Price is near or matching historical pattern start price\n"
                 f"{'-'*50}\n"
             )
-            break  # one valid pattern is enough
+            break
 
     return alerts
 
@@ -150,7 +143,7 @@ def check_h45_signal(symbol):
 
     df["DMA200"] = df["Close"].rolling(200).mean()
 
-    current_price = df["Close"].iloc[-1]
+    current_price = float(df["Close"].iloc[-1])
     dma200 = df["DMA200"].iloc[-1]
 
     if pd.isna(dma200):
