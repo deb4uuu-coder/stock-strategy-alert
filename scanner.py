@@ -1,15 +1,17 @@
 import pandas as pd
 import yfinance as yf
-from datetime import datetime
 import math
+import smtplib
+from email.message import EmailMessage
+import os
 
-# ---------- SETTINGS ----------
-GREEN_MOVE_PERCENT = 20
-PRICE_MATCH_TOLERANCE = 3     # ±3%
-H45_DMA_DROP = 14
+# ================= SETTINGS =================
+GREEN_MOVE_PERCENT = 20          # minimum up move
+PRICE_MATCH_TOLERANCE = 3        # +3% tolerance
+H45_DMA_DROP = 14                # 14% below 200 DMA
 YEARS_OF_DATA = "5y"
 
-# ---------- READ STOCKS FROM CSV ----------
+# ================= LOAD STOCKS =================
 def load_stocks():
     df = pd.read_csv("stocks_layout.csv", header=None)
 
@@ -19,6 +21,7 @@ def load_stocks():
         "H45": []
     }
 
+    # Column indexes: B=1, E=4, H=7
     for col, group in [(1, "V40"), (4, "V40_NEXT"), (7, "H45")]:
         for row in range(2, len(df)):
             symbol = df.iloc[row, col]
@@ -27,7 +30,7 @@ def load_stocks():
 
     return groups
 
-# ---------- DOWNLOAD DATA ----------
+# ================= DATA FETCH =================
 def get_data(symbol):
     df = yf.download(symbol, period=YEARS_OF_DATA, interval="1d", progress=False)
     if df.empty or len(df) < 200:
@@ -35,7 +38,7 @@ def get_data(symbol):
     df.reset_index(inplace=True)
     return df
 
-# ---------- FIND GREEN CANDLE PATTERNS ----------
+# ================= GREEN PATTERN LOGIC =================
 def find_green_patterns(df):
     patterns = []
     start_idx = None
@@ -67,7 +70,7 @@ def evaluate_pattern(df, start, end, patterns):
             "move_pct": move_pct
         })
 
-# ---------- V40 / V40 NEXT LOGIC ----------
+# ================= V40 / V40 NEXT =================
 def process_v40(symbol):
     df = get_data(symbol)
     if df is None:
@@ -81,17 +84,18 @@ def process_v40(symbol):
         diff_pct = ((cmp_price - p["start_price"]) / p["start_price"]) * 100
         if cmp_price <= p["start_price"] or diff_pct <= PRICE_MATCH_TOLERANCE:
             alerts.append(
-                f"BUY ALERT (V40)\n"
+                f"BUY ALERT (V40 / V40 NEXT)\n"
                 f"Stock: {symbol}\n"
                 f"CMP: {round(cmp_price,2)}\n"
-                f"Pattern: {p['start_date']} → {p['end_date']}\n"
+                f"Pattern Start: {p['start_date']}\n"
+                f"Pattern End: {p['end_date']}\n"
                 f"Pattern Move: {round(p['move_pct'],2)}%\n"
                 f"Pattern Start Price: {round(p['start_price'],2)}\n"
                 f"Difference: {round(diff_pct,2)}%"
             )
     return alerts
 
-# ---------- H45 LOGIC ----------
+# ================= H45 =================
 def process_h45(symbol):
     df = get_data(symbol)
     if df is None:
@@ -116,7 +120,26 @@ def process_h45(symbol):
         )
     return None
 
-# ---------- MAIN ----------
+# ================= EMAIL =================
+def send_email_alert(message):
+    email_user = os.getenv("EMAIL_USER")
+    email_pass = os.getenv("EMAIL_PASS")
+
+    if not email_user or not email_pass:
+        print("Email credentials missing")
+        return
+
+    msg = EmailMessage()
+    msg["Subject"] = "📊 Stock Buy Alert"
+    msg["From"] = email_user
+    msg["To"] = email_user
+    msg.set_content(message)
+
+    with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
+        server.login(email_user, email_pass)
+        server.send_message(msg)
+
+# ================= MAIN =================
 def main():
     groups = load_stocks()
     all_alerts = []
@@ -133,7 +156,9 @@ def main():
             all_alerts.append(alert)
 
     if all_alerts:
-        print("\n\n".join(all_alerts))
+        full_message = "\n\n".join(all_alerts)
+        print(full_message)
+        send_email_alert(full_message)
     else:
         print("No alerts today.")
 
