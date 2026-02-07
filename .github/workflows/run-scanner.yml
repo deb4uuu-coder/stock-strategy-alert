@@ -1,16 +1,22 @@
-name: Stock Scanner
+name: Stock Strategy Scanner
 
 on:
-  workflow_dispatch:   # manual run
+  workflow_dispatch:   # Manual run (email always)
   schedule:
-    - cron: "30 2 * * *"   # 8:00 AM IST
+    # 8:00 AM IST = 02:30 UTC
+    - cron: "30 2 * * 1-5"
 
 jobs:
   scan:
     runs-on: ubuntu-latest
 
+    env:
+      EMAIL_FROM: ${{ secrets.EMAIL_FROM }}
+      EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
+      EMAIL_TO: ${{ secrets.EMAIL_TO }}
+
     steps:
-      - name: Checkout repo
+      - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Set up Python
@@ -19,9 +25,9 @@ jobs:
           python-version: "3.11"
 
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
 
-      - name: Run scanner
-        env:
-          EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
+      - name: Run stock scanner
         run: python scanner.py
