@@ -4,6 +4,7 @@ import smtplib
 import os
 from email.mime.text import MIMEText
 from datetime import datetime
+from zoneinfo import ZoneInfo
 
 # ================= CONFIG =================
 
@@ -20,24 +21,31 @@ LOOKBACK_YEARS = 4
 
 GITHUB_EVENT = os.getenv("GITHUB_EVENT_NAME", "")
 
+IST = ZoneInfo("Asia/Kolkata")
+
 # =========================================
 
 
-def is_weekend():
-    return datetime.now().weekday() >= 5
+def is_weekend_ist():
+    ist_now = datetime.now(IST)
+    return ist_now.weekday() >= 5   # Saturday / Sunday
 
 
 def allow_email():
+    # Manual run → always allow
     if GITHUB_EVENT == "workflow_dispatch":
         return True
-    if GITHUB_EVENT == "schedule" and is_weekend():
+
+    # Scheduled run → block weekends (IST)
+    if GITHUB_EVENT == "schedule" and is_weekend_ist():
         return False
+
     return True
 
 
 def send_email(body):
     if not allow_email():
-        print("Weekend detected — email skipped.")
+        print("Weekend detected (IST) — email skipped.")
         return
 
     msg = MIMEText(body)
@@ -69,8 +77,8 @@ def download_data(symbol):
 
 def find_v20_patterns(df):
     """
-    Find overall up-move patterns (not strict green candles)
-    where move >= 20%
+    Finds overall up-move patterns where price moved >= 20%
+    (not strict green candles)
     """
     patterns = []
     closes = df["Close"]
@@ -81,8 +89,7 @@ def find_v20_patterns(df):
         start_price = closes.iloc[i]
         start_date = dates[i]
 
-        j = i + 1
-        while j < len(closes):
+        for j in range(i + 1, len(closes)):
             move = (closes.iloc[j] - start_price) / start_price
             if move >= V20_MIN_MOVE:
                 patterns.append({
@@ -93,8 +100,6 @@ def find_v20_patterns(df):
                     "move_pct": move * 100
                 })
                 break
-            j += 1
-
         i += 1
 
     return patterns
@@ -129,9 +134,9 @@ def check_v20_signal(symbol, group_name):
                 f"• Distance from Pattern Start: {diff_pct*100:.2f}%\n\n"
                 f"Reason:\n"
                 f"Price is near or matching historical pattern start price\n"
-                f"{'-'*45}\n"
+                f"{'-'*50}\n"
             )
-            break  # one pattern is enough
+            break  # one valid pattern is enough
 
     return alerts
 
@@ -164,7 +169,7 @@ def check_h45_signal(symbol):
             f"• Distance from 200 DMA: {drop_pct*100:.2f}%\n\n"
             f"Reason:\n"
             f"Stock is trading ≥14% below 200-day moving average\n"
-            f"{'-'*45}\n"
+            f"{'-'*50}\n"
         ]
 
     return []
