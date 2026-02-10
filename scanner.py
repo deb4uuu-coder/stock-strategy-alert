@@ -14,7 +14,7 @@ IST = pytz.timezone("Asia/Kolkata")
 
 V20_MIN_MOVE = 20      # 20% upmove
 V20_PULLBACK_RANGE = 5 # Alert when price pulls back within 5% of pattern start
-V20_LOOKBACK_DAYS = 180  # Only check patterns from last 6 months
+V20_LOOKBACK_DAYS = 1095  # Check patterns from last 3 years (365 * 3)
 H45_DMA_DIFF = 14      # 14% below 200 DMA
 # ==========================================
 
@@ -102,7 +102,7 @@ def read_stocks():
 def find_v20_patterns(symbol):
     """
     Find V20 patterns - strong upward moves of 20%+ that could indicate support levels.
-    Returns list of recent patterns (last 6 months).
+    Returns list of patterns from last 3 years (can be 1 or multiple patterns).
     """
     try:
         # Download longer history for pattern detection
@@ -189,29 +189,49 @@ def check_h45(symbol):
     """
     Check if stock is 14%+ below 200 DMA (H45 pattern).
     Returns (diff%, current_price, 200_dma) or None.
+    
+    Formula: If current price is BELOW 200 DMA by 14%+, it's a buy signal.
+    diff = ((200_DMA - current_price) / 200_DMA) * 100
     """
     try:
         df = yf.download(symbol, period="1y", progress=False)
         if df.empty:
+            print(f"    ⚠️  {symbol}: No data available")
             return None
 
         df = clean_yf_df(df)
 
         if len(df) < 200:
+            print(f"    ⚠️  {symbol}: Insufficient data (need 200 days, got {len(df)})")
             return None
 
         current = float(df["Close"].iloc[-1])
-        dma200 = float(df["Close"].rolling(200).mean().iloc[-1])
+        
+        # Calculate 200-day moving average
+        dma200_series = df["Close"].rolling(window=200).mean()
+        dma200 = float(dma200_series.iloc[-1])
 
+        # Check if DMA is valid
+        if pd.isna(dma200):
+            print(f"    ⚠️  {symbol}: 200 DMA calculation failed")
+            return None
+
+        # Calculate how far below the 200 DMA
+        # Positive diff means stock is BELOW the DMA (good for H45)
         diff = ((dma200 - current) / dma200) * 100
 
+        # Debug output for all H45 stocks
+        print(f"    📊 {symbol}: Price=₹{round(current, 2)}, 200DMA=₹{round(dma200, 2)}, Diff={round(diff, 2)}%", end="")
+        
         if diff >= H45_DMA_DIFF:
+            print(f" ✅ ALERT!")
             return round(diff, 2), round(current, 2), round(dma200, 2)
-
-        return None
+        else:
+            print(f" (threshold: {H45_DMA_DIFF}%)")
+            return None
     
     except Exception as e:
-        print(f"  ⚠️  Error processing {symbol}: {e}")
+        print(f"    ❌ Error processing {symbol}: {e}")
         return None
 
 
@@ -234,46 +254,62 @@ def run(manual):
     print(f"{'='*60}")
     
     for group in ["V40", "V40NEXT"]:
+        if not stocks[group]:
+            print(f"  ℹ️  No stocks in {group}")
+            continue
+            
         for s in stocks[group]:
             try:
                 # Find historical V20 patterns
                 patterns = find_v20_patterns(s)
+                
                 if not patterns:
                     continue
+
+                print(f"  📈 {s}: Found {len(patterns)} V20 pattern(s)")
 
                 # Get current price
                 df = yf.download(s, period="5d", progress=False)
                 df = clean_yf_df(df)
 
                 if df.empty:
+                    print(f"    ⚠️  Cannot get current price")
                     continue
 
                 current = float(df["Close"].iloc[-1])
+                
+                alert_count = 0
 
                 # Check if current price has pulled back near any pattern's START price
-                for p in patterns:
+                for idx, p in enumerate(patterns):
                     # Calculate how far current price is from pattern start
                     diff_from_start = ((current - p["start_price"]) / p["start_price"]) * 100
                     
                     # Calculate how far current price has fallen from the peak
                     pullback_from_peak = ((p["peak_price"] - current) / p["peak_price"]) * 100
 
+                    print(f"    Pattern {idx+1}: Start=₹{p['start_price']}, Peak=₹{p['peak_price']} (+{p['move']}%), Current diff={round(diff_from_start, 2)}%, Pullback={round(pullback_from_peak, 2)}%")
+
                     # Alert if:
                     # 1. Price is within V20_PULLBACK_RANGE% of the original start price (support level)
                     # 2. Price has pulled back at least 10% from peak (confirming it's a pullback scenario)
                     if abs(diff_from_start) <= V20_PULLBACK_RANGE and pullback_from_peak >= 10:
+                        alert_count += 1
                         alerts.append(
-                            f"🎯 V20 PATTERN ACTIVATED ({group})\n"
+                            f"🎯 V20 PATTERN #{alert_count} ACTIVATED ({group})\n"
                             f"Stock: {s}\n"
-                            f"Pattern Start: {p['start_date']} @ ₹{p['start_price']}\n"
+                            f"Pattern Date: {p['start_date']}\n"
+                            f"Support Level: ₹{p['start_price']}\n"
                             f"Peak Price: ₹{p['peak_price']} (+{p['move']}%)\n"
                             f"Current Price: ₹{round(current, 2)}\n"
                             f"Distance from Support: {round(diff_from_start, 2)}%\n"
                             f"Pullback from Peak: {round(pullback_from_peak, 2)}%\n"
                             f"📊 ACTION: Price near support level - potential buy opportunity"
                         )
-                        print(f"  ✓ {s} - V20 Pattern Alert! (Current: ₹{round(current, 2)}, Support: ₹{p['start_price']})")
-                        break  # Only one alert per stock
+                        print(f"      ✅ ALERT! Price near support (within {V20_PULLBACK_RANGE}%)")
+                
+                if alert_count > 0:
+                    print(f"  ✓ {s} - {alert_count} V20 alert(s) generated!")
             
             except Exception as e:
                 print(f"  ⚠️  Error scanning {s}: {e}")
@@ -282,6 +318,9 @@ def run(manual):
     print(f"\n{'='*60}")
     print(f"Scanning H45 stocks for 200 DMA patterns...")
     print(f"{'='*60}")
+    
+    if not stocks["H45"]:
+        print("  ℹ️  No stocks in H45 watchlist")
     
     for s in stocks["H45"]:
         try:
@@ -294,9 +333,9 @@ def run(manual):
                     f"Current Price: ₹{price}\n"
                     f"200 DMA: ₹{dma}\n"
                     f"Below DMA: {diff}%\n"
-                    f"📊 ACTION: Stock significantly below long-term average"
+                    f"📊 ACTION: Stock significantly below long-term average - potential buy"
                 )
-                print(f"  ✓ {s} - H45 Pattern Alert! ({diff}% below 200 DMA)")
+                print(f"  ✓ Alert generated for {s}")
         
         except Exception as e:
             print(f"  ⚠️  Error scanning {s}: {e}")
